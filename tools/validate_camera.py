@@ -7,14 +7,14 @@ rendering provides different views per environment.
 Usage:
     python tools/validate_camera.py
 
-Result determines which rendering path training code should use:
-  PASS -> Use env_separate_rigid=True (multi-env cameras work)
-  FAIL -> Use sequential rendering fallback (render each env separately)
+Result determines whether Genesis multi-env camera rendering provides distinct
+views when using manual camera.set_pose() to track per-env drone positions.
 """
 
 import sys
 import os
 import numpy as np
+import torch
 
 # Ensure project root is on path when run from tools/ subdirectory
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +42,6 @@ def build_validation_scene():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01, substeps=2),
         vis_options=gs.options.VisOptions(
-            env_separate_rigid=True,
             rendered_envs_idx=list(range(N_ENVS)),
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -97,14 +96,12 @@ def build_validation_scene():
     T[:3, :3] = rotation.as_matrix()
     T[2, 3] = -0.1
 
-    camera.attach(drone.get_link("base"), T)
-
     scene.build(
         n_envs=N_ENVS,
         env_spacing=(STRIP_LENGTH + 5, total_width + 5),
     )
 
-    return scene, drone, camera
+    return scene, drone, camera, T, drone.get_link("base")
 
 
 def set_drone_heights(drone, heights):
@@ -112,6 +109,17 @@ def set_drone_heights(drone, heights):
     for i, h in enumerate(heights):
         pos = np.array([[0.0, 0.0, h]])
         drone.set_pos(pos, envs_idx=np.array([i]))
+
+
+def update_camera_pose(camera, drone_link, offset_T):
+    """Manually update camera to follow drone, replicating move_to_attach logic."""
+    import genesis.utils.geom as gu
+    link_pos = drone_link.get_pos()
+    link_quat = drone_link.get_quat()
+    link_T = gu.trans_quat_to_T(link_pos, link_quat)
+    offset_T_tensor = torch.as_tensor(offset_T, dtype=gs.tc_float, device=gs.device)
+    world_T = torch.matmul(link_T, offset_T_tensor)
+    camera.set_pose(transform=world_T)
 
 
 def render_cameras(camera):
@@ -192,13 +200,16 @@ def main():
     gs.init(backend=gs.gpu)
 
     print("Building validation scene...")
-    scene, drone, camera = build_validation_scene()
+    scene, drone, camera, offset_T, base_link = build_validation_scene()
 
     print("Positioning drones at different heights...")
     set_drone_heights(drone, DRONE_HEIGHTS)
 
     print("Stepping physics once...")
     scene.step()
+
+    print("Updating camera pose to track drone positions...")
+    update_camera_pose(camera, base_link, offset_T)
 
     print("Rendering cameras...")
     depth_array, render_success = render_cameras(camera)
@@ -220,7 +231,7 @@ def main():
         print("RESULT: PASS")
         print("-" * 60)
         print("Multi-env cameras work. Depth values differ across environments.")
-        print("Recommended action: Use env_separate_rigid=True in training.")
+        print("Recommended action: Multi-env camera rendering works with manual set_pose tracking.")
         print("  -> Training will use parallel camera rendering (fast path).")
     elif is_multi_env and not views_differ:
         print("RESULT: FAIL (shape OK but views identical)")
