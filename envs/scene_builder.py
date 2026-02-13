@@ -52,7 +52,12 @@ class VineyardSceneBuilder:
             show_viewer: Whether to show interactive viewer
 
         Returns:
-            scene, drone, camera, seg_idx_to_label
+            scene, drone, camera, seg_idx_to_label, camera_offset_T
+
+            camera_offset_T is a numpy (4, 4) transform matrix representing the
+            camera's pose relative to the drone base link. Camera tracking is now
+            manual: the caller must call camera.set_pose(transform=world_T) before
+            each camera.render(), where world_T = link_T @ camera_offset_T.
         """
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
@@ -60,7 +65,6 @@ class VineyardSceneBuilder:
                 substeps=2,
             ),
             vis_options=gs.options.VisOptions(
-                env_separate_rigid=True,
                 rendered_envs_idx=list(range(n_envs)),
             ),
             viewer_options=gs.options.ViewerOptions(
@@ -125,7 +129,8 @@ class VineyardSceneBuilder:
         T[:3, :3] = rotation.as_matrix()
         T[2, 3] = -0.1  # Offset slightly below drone
 
-        camera.attach(drone.get_link("base"), T)
+        # Store offset for manual tracking (env calls camera.set_pose each step)
+        self.camera_offset_T = T
 
         # Build scene with parallel environments
         scene.build(
@@ -147,7 +152,7 @@ class VineyardSceneBuilder:
             if entity_idx in idx_to_label:
                 self.seg_idx_to_label[seg_idx] = idx_to_label[entity_idx]
 
-        return scene, drone, camera, self.seg_idx_to_label
+        return scene, drone, camera, self.seg_idx_to_label, self.camera_offset_T
 
     def segmentation_to_semantic(self, raw_segmentation) -> torch.Tensor:
         """
