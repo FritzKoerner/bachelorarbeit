@@ -6,6 +6,9 @@ import torch
 import numpy as np
 from typing import Dict, Tuple, Optional
 
+import genesis as gs
+import genesis.utils.geom as gu
+
 from envs.scene_builder import VineyardSceneBuilder
 from controllers.low_level_controller import VelocityController
 from utils.reward_functions import LandingRewardFunction
@@ -66,10 +69,15 @@ class VineyardLandingEnv:
         Must not be called before gs.init() in train.py.
         """
         self.scene_builder = VineyardSceneBuilder(self.config['scene'])
-        self.scene, self.drone, self.camera, _ = self.scene_builder.build_scene(
+        self.scene, self.drone, self.camera, _, camera_offset_T = self.scene_builder.build_scene(
             n_envs=self.n_envs,
             show_viewer=self.config['scene'].get('show_viewer', False),
         )
+        # Convert camera offset to torch tensor for use in _update_camera_pose()
+        self.camera_offset_T = torch.as_tensor(camera_offset_T, dtype=gs.tc_float, device=gs.device)
+
+        # Cache drone base link to avoid repeated get_link() lookups
+        self.drone_base_link = self.drone.get_link("base")
 
         ctrl_cfg = self.config['controller']
         self.controller = VelocityController(
@@ -133,6 +141,9 @@ class VineyardLandingEnv:
 
         # Step physics once to settle
         self.scene.step()
+
+        # Update camera to drone position before rendering initial observation
+        self._update_camera_pose()
 
         # Get initial observation
         obs = self._get_obs()
@@ -230,6 +241,23 @@ class VineyardLandingEnv:
 
         return obs, rewards, dones, info
 
+    def _update_camera_pose(self):
+        """
+        Manually update camera pose to follow drone base link.
+
+        Replicates Genesis camera.move_to_attach() logic, which is blocked
+        when env_separate_rigid was True. We removed env_separate_rigid but
+        still use manual tracking for explicit control.
+
+        Computes: world_T = link_T @ camera_offset_T
+        Then calls camera.set_pose(transform=world_T)
+        """
+        link_pos = self.drone_base_link.get_pos()    # (n_envs, 3)
+        link_quat = self.drone_base_link.get_quat()  # (n_envs, 4)
+        link_T = gu.trans_quat_to_T(link_pos, link_quat)    # (n_envs, 4, 4)
+        world_T = torch.matmul(link_T, self.camera_offset_T)  # (n_envs, 4, 4)
+        self.camera.set_pose(transform=world_T)
+
     def _render_camera(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Render depth + segmentation from drone camera.
@@ -240,6 +268,7 @@ class VineyardLandingEnv:
             depth: tensor, shape (H, W) for single env or (n_envs, H, W) for multi-env
             segmentation: tensor, shape (H, W) or (n_envs, H, W) raw segmentation indices
         """
+        self._update_camera_pose()
         _, depth, segmentation, _ = self.camera.render(depth=True, segmentation=True)
         return depth, segmentation
 
