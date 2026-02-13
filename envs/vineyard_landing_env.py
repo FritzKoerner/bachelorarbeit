@@ -245,9 +245,8 @@ class VineyardLandingEnv:
         """
         Manually update camera pose to follow drone base link.
 
-        Replicates Genesis camera.move_to_attach() logic, which is blocked
-        when env_separate_rigid was True. We removed env_separate_rigid but
-        still use manual tracking for explicit control.
+        Replicates Genesis camera.move_to_attach() logic for explicit control.
+        Avoids GenesisException from automatic camera attachment in multi-env mode.
 
         Computes: world_T = link_T @ camera_offset_T
         Then calls camera.set_pose(transform=world_T)
