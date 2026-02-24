@@ -1,0 +1,29 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../drone"
+		}
+	],
+	"settings": {
+		"python-envs.defaultEnvManager": "ms-python.python:conda",
+		"python-envs.defaultPackageManager": "ms-python.python:conda"
+	},
+	"launch": {
+		"version": "0.2.0",
+		"configurations": [
+			{
+				"name": "Debug train.py",
+				"type": "debugpy",
+				"request": "launch",
+				"program": "${workspaceFolder:genesis}/prototyp_global_coordinate/train.py",
+				"cwd": "${workspaceFolder:genesis}/prototyp_global_coordinate",
+				"console": "integratedTerminal",
+				"justMyCode": true,
+				"python": "/home/fritz-sfl/miniconda3/envs/ba/bin/python"
+			}
+		]
+	}
+}
