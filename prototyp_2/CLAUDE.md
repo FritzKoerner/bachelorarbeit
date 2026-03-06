@@ -1,4 +1,6 @@
-# Drone Landing in Vineyards - RL Pipeline
+# Drone Landing in Vineyards - RL Pipeline (REFERENCE ONLY)
+
+> **This prototype is superseded by `prototyp_global_coordinate/`.** See the root `CLAUDE.md` for the active project. This file is kept for architectural reference.
 
 ## Project Overview
 
