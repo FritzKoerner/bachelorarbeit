@@ -34,14 +34,22 @@ python train.py
 # Evaluation
 python eval_rl.py      # PPO
 python eval_rl_ac.py   # SAC
+
+# Visualization
+python visualize_paths.py --ckpt 100 300                  # matplotlib + screenshots
+python visualize_paths.py --ckpt 300 --video              # + landing GIF with trail
+python visualize_paths.py --ckpt 100 300 --no_render      # matplotlib only
 ```
 
 ## Dependencies
 
-Conda environment: `ba`. Key packages: `genesis-world==0.3.13`, `torch>=2.0.0`, `numpy`, `scipy`, `pyyaml`, `tensorboard`, `rsl-rl-lib==2.2.4`, `stable-baselines3`.
+Conda environment: `ba`. Key packages: `genesis-world==0.3.13`, `torch>=2.0.0`, `numpy`, `scipy`, `pyyaml`, `tensorboard`, `rsl-rl-lib==2.2.4`, `stable-baselines3`. Note: `moviepy`, `cv2`, and `ffmpeg` are NOT installed — video output falls back to PIL GIF.
 
 ## Genesis API Quirks (v0.3.13)
 
+- **`scene.add_camera()` blocked post-build** — bypass via `scene._visualizer.add_camera(res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug)` + `cam.build()`
+- **Debug drawing**: `scene.visualizer.context` has `draw_debug_line`, `draw_debug_sphere`, `draw_debug_mesh`, `clear_debug_objects()`. Rasterizer only (not RayTracer).
+- **`gs.UID()` short format is 7 hex chars** — collides via birthday problem at ~15k nodes. Combine line segments into one trimesh via `trimesh.util.concatenate()` and use `draw_debug_mesh`.
 - **Two-phase construction**: call `gs.init(backend=gs.gpu)` once, then `env.build()` — the env constructor does NOT build the scene
 - **No `camera.start()`/`stop()`** — call `camera.render()` directly
 - `camera.render(depth=True, segmentation=True)` returns a **tuple** `(rgb, depth, segmentation, normal)`, not a dict
@@ -53,6 +61,7 @@ Conda environment: `ba`. Key packages: `genesis-world==0.3.13`, `torch>=2.0.0`, 
 - Quaternions: w-x-y-z format
 - Euler angles: degrees, scipy extrinsic x-y-z
 - All state tensors shaped `(n_envs, ...)` on `gs.device`
+- **Auto-reset contaminates state**: when `step()` returns `done=True`, the env has already reset — `base_pos` reflects the new spawn, not the terminal position. Record positions BEFORE `step()` or break before reading post-done state.
 
 ## Architecture
 
@@ -65,6 +74,7 @@ prototyp_global_coordinate/
   eval_rl.py           - PPO evaluation
   eval_rl_ac.py        - SAC evaluation
   train.py             - PID-only test (no RL)
+  visualize_paths.py   - Flight path visualization, Genesis screenshots, and landing GIFs per checkpoint
   envs/
     coordinate_landing_env.py - rsl-rl compatible env (reset/step/reward)
   controllers/
@@ -82,12 +92,21 @@ prototyp_global_coordinate/
 2. **Velocity PID** (X/Y → desired roll/pitch, Z → thrust)
 3. **Attitude PID** → corrections fed into motor mixer
 
+## rsl-rl Gotchas
+
+- `OnPolicyRunner.__init__` calls `.pop()` on config dicts, mutating them. Always pass `copy.deepcopy(train_cfg)` when creating multiple runners.
+- `get_inference_policy()` returns a deterministic MLP wrapper — batch-size agnostic, works with any `num_envs`.
+
+## rsl-rl Versions
+
+- **Installed (`rsl-rl-lib==2.2.4`)**: Monolithic `ActorCritic` class, flat tensor obs, `eval()` class resolution, `"policy": {}` config format. Currently used by `train_rl.py`.
+- **Development (`~/Repos/rsl_rl`)**: Separate `MLPModel`/`CNNModel` per actor+critic, `TensorDict` obs, `resolve_callable()`, `"actor":{}`+`"critic":{}` config, built-in CNN sharing via `share_cnn_encoders`. APIs are **incompatible** — env and config must be rewritten when upgrading.
+- CNN ActorCritic implementation guides: `prototyp_global_coordinate/docs/custom_cnn_actor_critic_guide.md` (v2.2.4) and `custom_cnn_actor_critic_guide_new_rsl_rl.md` (new version).
+
 ## Observation & Action Spaces
 
-- **Observation**: `(n_envs, 9)` — `rel_pos(3) + lin_vel(3) + ang_vel(3)`, each clipped and scaled
+- **Observation**: `(n_envs, 17)` — `rel_pos(3) + quat(4) + lin_vel(3) + ang_vel(3) + last_actions(4)`, each clipped and scaled
   - Observation scales: `rel_pos * 1/15`, `lin_vel * 1/5`, `ang_vel * 1/π`
-  - Additional fields (pos, quat, last_actions) exist in code but are currently commented out
-  - Note: `num_obs` in PPO config is set to 13 but `_compute_obs()` currently returns 9 — the config value is stale
 - **Actions**: `(n_envs, 4)` float in `[-1, 1]` — `[ax, ay, az, ayaw]`
   - `target_xyz = current_pos + action[:3] * action_scales` (offset from current position)
   - `target_yaw = ayaw * 180.0` (degrees)
@@ -106,6 +125,7 @@ prototyp_global_coordinate/
 
 - **NEVER sync with the HPC cluster of Uni Leipzig** or execute `sync_with_hpc.sh`. Any rsync/scp/ssh operations targeting the HPC cluster are strictly off-limits. The user manages HPC sync manually.
 
-## Genesis Plugin
+## Plugins
 
-Use the `genesis-world` plugin (installed at `~/.claude/plugins/genesis-world/`) as the primary API reference when writing Genesis simulation code. Consult its skill files for correct API usage before making changes.
+- **`genesis-world`** plugin (`~/.claude/plugins/genesis-world/`) — Genesis physics simulator API reference. Consult when writing simulation code.
+- **`rsl-rl`** plugin (`~/.claude/plugins/rsl-rl/`) — rsl-rl reinforcement learning library API reference. Consult when working with PPO training, OnPolicyRunner, actor-critic models, rollout storage, or any rsl-rl integration code.

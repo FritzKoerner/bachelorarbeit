@@ -1,0 +1,228 @@
+% ============================================================
+% SLIDE 1: Reward-Berechnung
+% ============================================================
+\begin{frame}{Methoden -- Reward-Berechnung}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+  \begin{block}{Dichte Belohnungen (pro Schritt)}
+    \begin{itemize}
+      \item \textbf{Distanz-Penalty}\\
+            $r_\text{dist} = -5{,}0 \cdot \Delta t \cdot \|\mathbf{p}_\text{rel}\|$
+      \item \textbf{Zeit-Penalty}\\
+            $r_\text{time} = -0{,}5 \cdot \Delta t$
+    \end{itemize}
+    \vspace{0.2em}
+    {\small Skalierung mit $\Delta t = 0{,}01\,$s macht Rewards zeitschrittunabhängig.}
+  \end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+  \begin{exampleblock}{Terminale Belohnungen (einmalig)}
+    \begin{itemize}
+      \item \textbf{Crash}: $r_\text{crash} = -100$
+      \item \textbf{Erfolg}: $r_\text{success} = +200$
+    \end{itemize}
+    \vspace{0.2em}
+    {\small Nicht mit $\Delta t$ skaliert -- einmalige Ereignisse.}
+  \end{exampleblock}
+  \begin{alertblock}{Gesamtreward}
+    $R = \sum_t (r_\text{dist} + r_\text{time}) + r_\text{terminal}$
+  \end{alertblock}
+\end{column}
+\end{columns}
+\end{frame}
+
+
+% ============================================================
+% SLIDE 2: Netzwerk-Architektur
+% ============================================================
+\begin{frame}{Methoden -- Netzwerk-Architektur}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+  \begin{block}{Actor-Critic (PPO)}
+    \begin{itemize}
+      \item \textbf{Actor}: MLP $[128, 128]$
+      \item \textbf{Critic}: MLP $[128, 128]$
+      \item Aktivierung: \texttt{tanh}
+      \item Initiales Rauschen: $\sigma_0 = 1{,}0$
+    \end{itemize}
+  \end{block}
+  \vspace{0.2cm}
+  \begin{block}{Eingabe / Ausgabe}
+    \begin{itemize}
+      \item Eingabe: 17 Observationen
+      \item Ausgabe: 4 Aktionen $\in [-1, 1]$
+    \end{itemize}
+  \end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+  \begin{exampleblock}{Datenfluss}
+    \small
+    \textbf{Obs} (17) $\xrightarrow{\text{Actor}}$ \textbf{Aktion} (4)\\
+    \vspace{0.3em}
+    $\downarrow$ \textit{Action Scaling}\\
+    \vspace{0.3em}
+    \textbf{PID-Zielposition} $(x, y, z, \psi)$\\
+    \vspace{0.3em}
+    $\downarrow$ \textit{Kaskadierender PID}\\
+    \vspace{0.3em}
+    \textbf{Motor-RPMs} (4 Propeller)\\
+    \vspace{0.3em}
+    $\downarrow$ \textit{Genesis Physik}\\
+    \vspace{0.3em}
+    \textbf{Neuer Zustand}
+  \end{exampleblock}
+\end{column}
+\end{columns}
+\end{frame}
+
+
+% ============================================================
+% SLIDE 3: Observationen und Normalisierung
+% ============================================================
+\begin{frame}{Methoden -- Observationsraum}
+\begin{columns}[T]
+\begin{column}{0.55\textwidth}
+  \begin{block}{Observationsvektor ($\dim = 17$)}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{lll}
+      \hline
+      \textbf{Größe} & \textbf{Dim} & \textbf{Skalierung} \\
+      \hline
+      Relative Position & 3 & $\times \tfrac{1}{15}$, clip $[-1,1]$ \\
+      Quaternion        & 4 & -- \\
+      Lineare Geschw.   & 3 & $\times \tfrac{1}{5}$, clip $[-1,1]$ \\
+      Winkelgeschw.     & 3 & $\times \tfrac{1}{\pi}$, clip $[-1,1]$ \\
+      Letzte Aktionen   & 4 & -- \\
+      \hline
+    \end{tabular}
+  \end{block}
+\end{column}
+\begin{column}{0.42\textwidth}
+  \begin{exampleblock}{Warum Normalisierung?}
+    \begin{itemize}
+      \item Werte $\in [-1, 1]$ stabilisieren das Training
+      \item Skalierung richtet sich nach physikalisch sinnvollen Maxima
+      \item Relative Position statt absoluter: generalisiert besser
+    \end{itemize}
+  \end{exampleblock}
+\end{column}
+\end{columns}
+\end{frame}
+
+
+% ============================================================
+% SLIDE 4: Hyperparameter
+% ============================================================
+\begin{frame}{Methoden -- Hyperparameter}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+  \begin{block}{PPO / Lernparameter}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{ll}
+      \hline
+      \textbf{Parameter}       & \textbf{Wert} \\
+      \hline
+      Discount $\gamma$        & $0{,}99$ \\
+      GAE $\lambda$            & $0{,}95$ \\
+      Lernrate                 & $3 \times 10^{-4}$ \\
+      Clipping $\epsilon$      & $0{,}2$ \\
+      Epochen / Update         & $5$ \\
+      Mini-Batches             & $4$ \\
+      Schritte pro Env         & $100$ \\
+      \hline
+    \end{tabular}
+  \end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+  \begin{exampleblock}{Reward-Skalierung}
+    \begin{tabular}{ll}
+      \hline
+      \textbf{Reward} & \textbf{Skala} \\
+      \hline
+      Distanz  & $-5{,}0$ \\
+      Zeit     & $-0{,}5$ \\
+      Crash    & $-100{,}0$ \\
+      Erfolg   & $+200{,}0$ \\
+      \hline
+    \end{tabular}
+  \end{exampleblock}
+  \begin{exampleblock}{Aktionsskalierung}
+    $\Delta x, \Delta y, \Delta z \in [-1, +1]\,$m\\
+    $\psi_\text{target} = a_\psi \cdot 180°$
+  \end{exampleblock}
+\end{column}
+\end{columns}
+\end{frame}
+
+
+% ============================================================
+% SLIDE 5: Environment-Architektur und Parameter
+% ============================================================
+\begin{frame}{Methoden -- Environment-Parameter}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+  \begin{block}{Spawn \& Zielbereich}
+    \begin{itemize}
+      \item \textbf{Drohne}: $x, y \in [-5, +5]\,$m\\
+            Höhe: $z = 10\,$m (fest)
+      \item \textbf{Ziel (PPO)}: fest bei $(3, 3, 1)\,$m
+      \item \textbf{Episodendauer}: $30\,$s\\
+            ($= 3000$ Schritte bei $100\,$Hz)
+      \item \textbf{Parallelität}: 4096 Umgebungen
+    \end{itemize}
+  \end{block}
+  \begin{block}{Curriculum}
+    \begin{itemize}
+      \item Erste $\mathbf{20\,000}$ Schritte:\\
+            Ziel $\leq 1\,$m von Drohne entfernt
+      \item Danach: volles Zielraster
+    \end{itemize}
+  \end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+  \begin{alertblock}{Abbruchbedingungen}
+    \begin{itemize}
+      \item Höhe $< 0{,}2\,$m (Boden)
+      \item Neigung $> 60°$ (Roll oder Pitch)
+      \item Abstand zum Ziel $> 50\,$m
+      \item Zeitlimit überschritten ($30\,$s)
+    \end{itemize}
+  \end{alertblock}
+  \begin{exampleblock}{Erfolgsbedingung}
+    $30$ konsekutive Schritte mit:\\
+    $\|\mathbf{p}_\text{rel}\| < 0{,}3\,$m \textbf{und}\\
+    $\|\mathbf{v}\| < 0{,}3\,$m/s
+    \vspace{0.2em}\\
+    {\small ($\hat{=}\ 0{,}3\,$s Schwebezeit am Ziel)}
+  \end{exampleblock}
+\end{column}
+\end{columns}
+\end{frame}
+
+
+% ============================================================
+% SLIDE 6: Abschlussfolie
+% ============================================================
+{
+\setbeamertemplate{footline}{}
+\begin{frame}[plain]
+\begin{tikzpicture}[remember picture, overlay]
+  \fill[svgPurple] (current page.north west) rectangle (current page.south east);
+  \fill[svgPurpleDark, opacity=0.4] (current page.south west) rectangle
+    ([yshift=3cm]current page.south east);
+  \fill[white, opacity=0.04] ([xshift=-2cm, yshift=-1cm]current page.north east) circle (4cm);
+  \fill[white, opacity=0.03] ([xshift=1cm, yshift=1cm]current page.south west) circle (5cm);
+  \draw[svgOrange, line width=2pt]
+    ([xshift=2cm, yshift=-4.8cm]current page.north west) --
+    ([xshift=14cm, yshift=-4.8cm]current page.north west);
+\end{tikzpicture}
+\vspace{1.5cm}
+\begin{center}
+  {\Large\bfseries\color{white}Vielen Dank}\\[0.3em]
+  {\normalsize\color{svgPurpleLight}für Ihre Aufmerksamkeit}\\[1em]
+  {\color{svgOrangeLight}\rule{4cm}{0.5pt}}\\[0.8em]
+  {\normalsize\color{svgPurpleLight}Fragen?}\\[1.5em]
+  {\small\color{white}Fritz Körner}
+\end{center}
+\end{frame}
+}
