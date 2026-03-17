@@ -9,3 +9,10 @@ __pycache__/
 *.png
 runs/
 logs/
+wandb/
+eval_data/
+artifacts/
+.firecrawl/
+prototyp_1/
+prototyp_2/
+prototyp_global_coordinate_rsl_2.2.4/
