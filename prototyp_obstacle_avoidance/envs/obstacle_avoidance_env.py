@@ -3,10 +3,10 @@ ObstacleAvoidanceEnv: rsl-rl v5.x compatible drone environment with obstacle avo
 
 Extends CoordinateLandingEnv with:
   - Random obstacle boxes between drone spawn area and target
-  - Downward-facing depth camera (CNN input)
-  - Distance-based obstacle collision detection
+  - Forward-facing depth camera (CNN input)
+  - AABB obstacle collision detection
   - Obstacle proximity penalty reward
-  - TensorDict observations: {"state": (n, 17), "depth": (n, 1, 64, 64)}
+  - Frame-stacked TensorDict observations: {"state": (n, 17), "depth": (n, stack, 64, 64)}
 
 Constructor signature (rsl-rl style):
     env = ObstacleAvoidanceEnv(num_envs, env_cfg, obs_cfg, reward_cfg, show_viewer)
@@ -17,10 +17,8 @@ Constructor signature (rsl-rl style):
 import math
 import copy
 
-import numpy as np
 import torch
 from tensordict import TensorDict
-from scipy.spatial.transform import Rotation
 
 import genesis as gs
 from genesis.utils.geom import (
@@ -28,7 +26,6 @@ from genesis.utils.geom import (
     transform_by_quat,
     inv_quat,
     transform_quat_by_quat,
-    trans_quat_to_T,
 )
 
 from controllers.pid_controller import CascadingPIDController
@@ -70,6 +67,10 @@ class ObstacleAvoidanceEnv:
         self.depth_res = obs_cfg.get("depth_res", 64)
         self.render_interval = env_cfg.get("render_interval", 2)
         self.max_depth = env_cfg.get("max_depth", 20.0)
+        self.depth_stack_size = obs_cfg.get("depth_stack_size", 3)
+        self.obstacle_half_extents = torch.tensor(
+            [s / 2.0 for s in self.obstacle_size], device=gs.device
+        )
 
         self._built = False
 
@@ -88,7 +89,8 @@ class ObstacleAvoidanceEnv:
                 camera_fov=60,
             ),
             vis_options=gs.options.VisOptions(
-                rendered_envs_idx=list(range(min(10, self.num_envs)))
+                rendered_envs_idx=list(range(self.num_envs)),
+                env_separate_rigid=True,
             ),
             rigid_options=gs.options.RigidOptions(
                 dt=self.dt,
@@ -135,7 +137,7 @@ class ObstacleAvoidanceEnv:
             )
             self.obstacles.append(obs_entity)
 
-        # Downward-facing depth camera (before scene.build)
+        # Forward-facing depth camera (pose set dynamically in _render_depth)
         self.depth_camera = scene.add_camera(
             res=(self.depth_res, self.depth_res),
             pos=(0, 0, 5),
@@ -159,14 +161,12 @@ class ObstacleAvoidanceEnv:
         scene.build(n_envs=self.num_envs, env_spacing=(env_spacing, env_spacing))
         self.scene = scene
 
-        # Drone base link for camera tracking
-        self.drone_base_link = self.drone.get_link("base")
+        if self.num_envs > 16:
+            print(f"[NOTE] Per-env depth rendering with {self.num_envs} envs "
+                  f"may be slow. Use -B 4 for local dev.")
 
-        # Camera offset transform: looking straight down, 10cm below drone
-        T = np.eye(4, dtype=np.float32)
-        T[:3, :3] = Rotation.from_euler("zyx", [-90, -90, 0], degrees=True).as_matrix()
-        T[2, 3] = -0.1
-        self.camera_offset_T = torch.as_tensor(T, dtype=gs.tc_float, device=gs.device)
+        # Drone base link
+        self.drone_base_link = self.drone.get_link("base")
 
         # Initial orientation
         self.base_init_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=gs.device)
@@ -203,8 +203,12 @@ class ObstacleAvoidanceEnv:
             (self.num_envs, self.num_state_obs), device=gs.device, dtype=gs.tc_float
         )
         self.depth_buf = torch.zeros(
-            (self.num_envs, 1, self.depth_res, self.depth_res), device=gs.device, dtype=gs.tc_float
+            (self.num_envs, self.depth_stack_size, self.depth_res, self.depth_res),
+            device=gs.device, dtype=gs.tc_float,
         )
+        # Last known forward direction (for hovering/near-zero velocity fallback)
+        self._last_forward = torch.zeros((self.num_envs, 3), device=gs.device, dtype=gs.tc_float)
+        self._last_forward[:, 0] = 1.0  # default: +X
 
         # Reward / reset buffers
         self.rew_buf            = torch.zeros((self.num_envs,), device=gs.device, dtype=gs.tc_float)
@@ -246,16 +250,155 @@ class ObstacleAvoidanceEnv:
         self.reset()
 
     # ------------------------------------------------------------------
-    # Camera tracking
+    # Obstacle placement strategies
     # ------------------------------------------------------------------
 
-    def _update_camera_pose(self):
-        """Move downward-facing camera to follow drone position."""
-        link_pos = self.drone_base_link.get_pos()    # (n_envs, 3)
-        link_quat = self.drone_base_link.get_quat()  # (n_envs, 4)
-        link_T = trans_quat_to_T(link_pos, link_quat)           # (n_envs, 4, 4)
-        world_T = torch.matmul(link_T, self.camera_offset_T)    # (n_envs, 4, 4)
-        self.depth_camera.set_pose(transform=world_T)
+    def _place_obstacles_random(self, envs_idx, spawn_pos, n, oz_val):
+        """Curriculum phase: sparse random obstacles in a wide area."""
+        ox_range = self.env_cfg.get("obstacle_x_range", [-8.0, 12.0])
+        oy_range = self.env_cfg.get("obstacle_y_range", [-8.0, 12.0])
+        curriculum_n = self.env_cfg.get("curriculum_n_obstacles", self.num_obstacles)
+
+        for i, obs_entity in enumerate(self.obstacles):
+            if i < curriculum_n:
+                new_x = gs_rand_float(*ox_range, (n,), gs.device)
+                new_y = gs_rand_float(*oy_range, (n,), gs.device)
+                new_z = torch.full((n,), oz_val, device=gs.device)
+            else:
+                # Move inactive obstacles underground
+                new_x = torch.zeros(n, device=gs.device)
+                new_y = torch.zeros(n, device=gs.device)
+                new_z = torch.full((n,), -100.0, device=gs.device)
+
+            new_pos = torch.stack([new_x, new_y, new_z], dim=-1)
+            obs_entity.set_pos(new_pos, envs_idx=envs_idx, zero_velocity=True)
+            self.obstacle_positions[envs_idx, i] = new_pos
+
+    def _place_obstacles_strategic(self, envs_idx, spawn_pos, n, oz_val):
+        """Post-curriculum: dense placement with guaranteed path blocker.
+
+        Layout:
+        - 1 guaranteed blocker on the direct spawn→target XY path
+        - (n_corridor - 1) additional corridor obstacles with wider lateral spread
+        - n_ring obstacles in a ring around the target
+        - remaining obstacles randomly near the target
+        """
+        target = self.target_pos[envs_idx]  # (n, 3)
+
+        # XY direction from spawn to target
+        direction_xy = target[:, :2] - spawn_pos[:, :2]  # (n, 2)
+        path_length = torch.norm(direction_xy, dim=1, keepdim=True)  # (n, 1)
+        dir_norm = direction_xy / (path_length + 1e-6)  # (n, 2)
+        perp = torch.stack([-dir_norm[:, 1], dir_norm[:, 0]], dim=-1)  # (n, 2)
+
+        n_corridor = self.env_cfg.get("n_corridor_obstacles", 3)
+        n_ring = self.env_cfg.get("n_ring_obstacles", 4)
+        ring_r_min, ring_r_max = self.env_cfg.get("ring_radius_range", [1.5, 3.5])
+        lateral_max = self.env_cfg.get("corridor_lateral_offset", 2.0)
+
+        obs_idx = 0
+
+        # --- Guaranteed blocker: near-zero lateral offset ---
+        t = gs_rand_float(0.4, 0.6, (n, 1), gs.device)
+        pos_on_path = spawn_pos[:, :2] + t * direction_xy
+        offset = gs_rand_float(-0.3, 0.3, (n, 1), gs.device)
+        pos_xy = pos_on_path + offset * perp
+        self._set_obstacle(obs_idx, pos_xy, oz_val, n, envs_idx)
+        obs_idx += 1
+
+        # --- Additional corridor obstacles: spread along path ---
+        for i in range(1, n_corridor):
+            t_lo = 0.15 + (i - 1) * 0.25
+            t_hi = t_lo + 0.25
+            t = gs_rand_float(t_lo, t_hi, (n, 1), gs.device)
+            pos_on_path = spawn_pos[:, :2] + t * direction_xy
+            offset = gs_rand_float(-lateral_max, lateral_max, (n, 1), gs.device)
+            pos_xy = pos_on_path + offset * perp
+            self._set_obstacle(obs_idx, pos_xy, oz_val, n, envs_idx)
+            obs_idx += 1
+
+        # --- Ring obstacles: around the target ---
+        for _ in range(n_ring):
+            if obs_idx >= self.num_obstacles:
+                break
+            angle = gs_rand_float(0, 2 * math.pi, (n,), gs.device)
+            radius = gs_rand_float(ring_r_min, ring_r_max, (n,), gs.device)
+            rx = target[:, 0] + torch.cos(angle) * radius
+            ry = target[:, 1] + torch.sin(angle) * radius
+            pos_xy = torch.stack([rx, ry], dim=-1)
+            self._set_obstacle(obs_idx, pos_xy, oz_val, n, envs_idx)
+            obs_idx += 1
+
+        # --- Remaining: random near target ---
+        near_range = self.env_cfg.get("post_curriculum_range", 5.0)
+        while obs_idx < self.num_obstacles:
+            rx = target[:, 0] + gs_rand_float(-near_range, near_range, (n,), gs.device)
+            ry = target[:, 1] + gs_rand_float(-near_range, near_range, (n,), gs.device)
+            pos_xy = torch.stack([rx, ry], dim=-1)
+            self._set_obstacle(obs_idx, pos_xy, oz_val, n, envs_idx)
+            obs_idx += 1
+
+    def _set_obstacle(self, idx, pos_xy, oz_val, n, envs_idx):
+        """Helper: set obstacle position from XY coordinates."""
+        new_pos = torch.stack([
+            pos_xy[:, 0], pos_xy[:, 1],
+            torch.full((n,), oz_val, device=gs.device),
+        ], dim=-1)
+        self.obstacles[idx].set_pos(new_pos, envs_idx=envs_idx, zero_velocity=True)
+        self.obstacle_positions[envs_idx, idx] = new_pos
+
+    # ------------------------------------------------------------------
+    # Depth rendering
+    # ------------------------------------------------------------------
+
+    def _render_depth(self):
+        """Render forward-facing depth per env and stack into history.
+
+        Camera looks along the drone's body X-axis projected to the XY
+        plane (horizontal forward).  With the Rasterizer
+        (env_separate_rigid=True) each env must be rendered individually:
+        set camera to env i's drone position, render all envs, extract
+        env i's slice.
+
+        Frame stacking: shifts depth_buf history left and inserts the
+        new frame at position [-1].
+        """
+        forward_body = torch.tensor([[1.0, 0.0, 0.0]], device=gs.device)
+
+        for env_i in range(self.num_envs):
+            # Forward direction from drone quaternion (body X -> world)
+            fwd = transform_by_quat(
+                forward_body, self.base_quat[env_i : env_i + 1]
+            )[0]  # (3,)
+            # Project to XY plane for horizontal look direction
+            fwd_xy = fwd.clone()
+            fwd_xy[2] = 0.0
+            fwd_len = torch.norm(fwd_xy)
+            if fwd_len < 1e-4:
+                # Drone looking straight up/down — use last known heading
+                fwd_xy = self._last_forward[env_i]
+            else:
+                fwd_xy = fwd_xy / fwd_len
+                self._last_forward[env_i] = fwd_xy
+
+            cam_pos = self.base_pos[env_i].clone()
+            cam_pos[2] -= 0.1  # slightly below drone centre
+            cam_lookat = cam_pos + fwd_xy * 5.0
+
+            self.depth_camera.set_pose(pos=cam_pos, lookat=cam_lookat)
+            _, depth_raw, _, _ = self.depth_camera.render(
+                depth=True, segmentation=False
+            )
+            depth = torch.as_tensor(
+                depth_raw, dtype=gs.tc_float, device=gs.device
+            )
+            # depth: (n_rendered, H, W) — extract this env's slice
+            new_depth = torch.clamp(depth[env_i] / self.max_depth, 0.0, 1.0)
+
+            # Frame stacking: shift history left, insert new frame
+            if self.depth_stack_size > 1:
+                self.depth_buf[env_i, :-1] = self.depth_buf[env_i, 1:].clone()
+            self.depth_buf[env_i, -1] = new_depth
 
     # ------------------------------------------------------------------
     # rsl-rl interface
@@ -293,11 +436,13 @@ class ObstacleAvoidanceEnv:
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
 
-        # Obstacle distance check
+        # AABB obstacle distance check (distance to box surface, 0 when inside)
         # base_pos: (n_envs, 3), obstacle_positions: (n_envs, n_obs, 3)
-        obs_dists = torch.norm(
-            self.base_pos.unsqueeze(1) - self.obstacle_positions, dim=-1
-        )  # (n_envs, n_obs)
+        diff = self.base_pos.unsqueeze(1) - self.obstacle_positions  # (n_envs, n_obs, 3)
+        clamped = torch.clamp(
+            torch.abs(diff) - self.obstacle_half_extents, min=0.0
+        )
+        obs_dists = torch.norm(clamped, dim=-1)  # (n_envs, n_obs)
         self.min_obstacle_dist = obs_dists.min(dim=1).values
         self.obstacle_collision = self.min_obstacle_dist < self.collision_radius
 
@@ -372,29 +517,15 @@ class ObstacleAvoidanceEnv:
             tz = gs_rand_float(*self.env_cfg["target_z_range"], (n,), gs.device)
         self.target_pos[envs_idx] = torch.stack([tx, ty, tz], dim=-1)
 
-        # Randomize obstacles — scatter between spawn area and target
-        ox_range = self.env_cfg.get("obstacle_x_range", [-8.0, 12.0])
-        oy_range = self.env_cfg.get("obstacle_y_range", [-8.0, 12.0])
+        # Randomize obstacles
         oz_val = self.obstacle_size[2] / 2.0  # half-height so base sits on ground
 
-        # Curriculum: fewer obstacles early
-        curriculum_n = self.env_cfg.get("curriculum_n_obstacles", 0)
-        active_obstacles = curriculum_n if self.global_step < curriculum_steps else self.num_obstacles
-
-        for i, obs_entity in enumerate(self.obstacles):
-            if i < active_obstacles:
-                new_x = gs_rand_float(*ox_range, (n,), gs.device)
-                new_y = gs_rand_float(*oy_range, (n,), gs.device)
-                new_z = torch.full((n,), oz_val, device=gs.device)
-            else:
-                # Move inactive obstacles far away
-                new_x = torch.zeros(n, device=gs.device)
-                new_y = torch.zeros(n, device=gs.device)
-                new_z = torch.full((n,), -100.0, device=gs.device)
-
-            new_pos = torch.stack([new_x, new_y, new_z], dim=-1)
-            obs_entity.set_pos(new_pos, envs_idx=envs_idx, zero_velocity=True)
-            self.obstacle_positions[envs_idx, i] = new_pos
+        if self.global_step < curriculum_steps:
+            # Curriculum: sparse random placement
+            self._place_obstacles_random(envs_idx, spawn_pos, n, oz_val)
+        else:
+            # Post-curriculum: strategic placement with guaranteed blocker
+            self._place_obstacles_strategic(envs_idx, spawn_pos, n, oz_val)
 
         # Set drone state
         self.base_pos[envs_idx]      = spawn_pos
@@ -417,6 +548,12 @@ class ObstacleAvoidanceEnv:
         self.reset_buf[envs_idx]          = True
         self.hover_counter[envs_idx]      = 0
 
+        # Clear depth history for reset envs (new episode, new obstacle layout)
+        self.depth_buf[envs_idx] = 0.0
+        self._last_forward[envs_idx, 0] = 1.0
+        self._last_forward[envs_idx, 1] = 0.0
+        self._last_forward[envs_idx, 2] = 0.0
+
         # Log episode stats
         self.extras["episode"] = {}
         for key in self.episode_sums:
@@ -429,6 +566,8 @@ class ObstacleAvoidanceEnv:
     def reset(self):
         self.reset_buf[:] = True
         self.reset_idx(torch.arange(self.num_envs, device=gs.device))
+        # Sync rasterizer with new obstacle/drone positions from reset_idx
+        self.scene.step()
         return self.get_observations()
 
     def get_observations(self) -> TensorDict:
@@ -454,13 +593,8 @@ class ObstacleAvoidanceEnv:
         )  # total: 17
 
         # Depth image — render every render_interval steps, reuse cached buffer otherwise
-        if self.episode_length_buf[0] % self.render_interval == 0:
-            self._update_camera_pose()
-            _, depth, _, _ = self.depth_camera.render(depth=True, segmentation=False)
-            # depth: (n_envs, H, W) for batched, or (H, W) for single env
-            if depth.dim() == 2:
-                depth = depth.unsqueeze(0)
-            self.depth_buf[:, 0] = torch.clamp(depth / self.max_depth, 0.0, 1.0)
+        if self.global_step % self.render_interval == 0:
+            self._render_depth()
 
         return TensorDict({
             "state": self.state_buf.clone(),

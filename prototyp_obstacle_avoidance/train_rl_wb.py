@@ -11,11 +11,26 @@ import genesis as gs
 from envs.obstacle_avoidance_env import ObstacleAvoidanceEnv
 
 
+class DictConfig(dict):
+    """Thin dict wrapper so rsl-rl's WandbSummaryWriter.store_config() works.
+
+    store_config tries env_cfg.to_dict() first, then dataclasses.asdict() —
+    both fail on a plain dict.  This wrapper adds the missing to_dict().
+    """
+
+    def to_dict(self):
+        return dict(self)
+
+
 def get_train_cfg(exp_name, max_iterations):
     return {
         # Runner-level
         "num_steps_per_env": 64,
         "save_interval": 100,
+
+        # W&B logging
+        "logger": "wandb",
+        "wandb_project": "obstacle-avoidance",
 
         # Algorithm
         "algorithm": {
@@ -76,7 +91,7 @@ def get_train_cfg(exp_name, max_iterations):
 
 
 def get_cfgs():
-    env_cfg = {
+    env_cfg = DictConfig({
         "num_actions": 4,
         "episode_length_s": 30.0,
         "action_scales": [3.0, 3.0, 3.0],
@@ -91,7 +106,7 @@ def get_cfgs():
         # Curriculum
         "curriculum_steps": 3000,
         "curriculum_radius": 1.0,
-        "curriculum_n_obstacles": 5,   # sparse random obstacles during curriculum
+        "curriculum_n_obstacles": 5,
         # Success
         "hover_radius": 0.3,
         "success_vel_threshold": 0.3,
@@ -99,16 +114,16 @@ def get_cfgs():
         # Obstacles
         "num_obstacles": 8,
         "obstacle_size": [1.0, 1.0, 2.0],
-        "obstacle_x_range": [-8.0, 12.0],   # curriculum: sparse random area
+        "obstacle_x_range": [-8.0, 12.0],
         "obstacle_y_range": [-8.0, 12.0],
         "collision_radius": 0.3,
         "safety_radius": 3.0,
         # Post-curriculum strategic placement
-        "n_corridor_obstacles": 3,           # along drone→target path
-        "n_ring_obstacles": 4,               # ring around target
+        "n_corridor_obstacles": 3,
+        "n_ring_obstacles": 4,
         "ring_radius_range": [1.5, 3.5],
         "corridor_lateral_offset": 2.0,
-        "post_curriculum_range": 5.0,        # remaining obstacles near target
+        "post_curriculum_range": 5.0,
         # Depth camera
         "render_interval": 2,
         "max_depth": 20.0,
@@ -132,7 +147,7 @@ def get_cfgs():
             "pid_params_pitch": [6.0, 0.0, 3.0],
             "pid_params_yaw":   [1.0, 0.0, 0.2],
         },
-    }
+    })
 
     obs_cfg = {
         "num_state_obs": 17,
@@ -202,9 +217,13 @@ if __name__ == "__main__":
     main()
 
 """
-# Training (headless, 64 envs — depth rollouts need more memory per env)
-python train_rl.py -B 64 --max_iterations 401
+# Training with W&B logging (headless, 64 envs)
+python train_rl_wb.py -B 64 --max_iterations 401
 
-# Smoke test with viewer
-python train_rl.py -B 4 -v --max_iterations 5
+# Smoke test with viewer (4 envs, 5 iterations)
+python train_rl_wb.py -B 4 -v --max_iterations 5
+
+# First-time W&B setup:
+#   pip install wandb
+#   wandb login
 """
