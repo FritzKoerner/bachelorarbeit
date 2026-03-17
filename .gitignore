@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pt
+*.zip
+*.db
+*.log
+*.gif
+*.png
+runs/
+logs/
