@@ -1,7 +1,0 @@
-torch>=2.0.0
-numpy>=1.24.0
-scipy
-genesis-world
-pyyaml
-tensorboard
-matplotlib
