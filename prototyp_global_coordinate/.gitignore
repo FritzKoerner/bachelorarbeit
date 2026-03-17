@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+optuna_pid.db
+logs/
+runs/
+*.png

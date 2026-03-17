@@ -1,0 +1,20 @@
+{
+  "project_name": "prototyp_global_coordinate",
+  "created": "2026-02-13",
+  "commit_docs": true,
+  "research_enabled": true,
+  "profile": "balanced",
+  "model_profile": "balanced",
+  "researcher_model": "sonnet",
+  "synthesizer_model": "sonnet",
+  "roadmapper_model": "sonnet",
+  "workflow": {
+    "research": true,
+    "plan_check": true,
+    "verifier": true,
+    "auto_advance": false
+  },
+  "git": {
+    "branching_strategy": "none"
+  }
+}
